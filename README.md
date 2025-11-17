@@ -2,7 +2,7 @@
 
 <div align="center">
 
-# Workers & Snippets deploy VLESS + trojan
+# Workers & Snippets deploy VLESS + trojan + shadowsocks
 
 **中文** | [English](README_EN.md)
 
@@ -11,6 +11,8 @@ Telegram交流反馈群组: https://t.me/eooceu
 基于 Cloudflare Workers & Snippets 的高性能 VLESS+trojan 代理服务
 
 YouTube视频部署教程：https://youtu.be/GEcKz2NoKlM
+
+Shadowsocks部署视频教程：https://youtu.be/hUPN_69Atow
 
 </div>
 
@@ -83,6 +85,11 @@ YouTube视频部署教程：https://youtu.be/GEcKz2NoKlM
 ```bash
 _acme-challenge
 ```
+
+## shadowsocks 节点参数对照图
+节点path为SSpath变量或uuid开头，示例：`/5dc15e15-f285-4a9d-959b-0e4fbdd77b63/?ed=2560`   带proxyip的示例：`/5dc15e15-f285-4a9d-959b-0e4fbdd77b63/?ed=2560&proxyip=xxxx`  小火箭可去掉`?ed=2560&` 来自定义proxyip或全局出站
+<img width="1463" height="1369" alt="image" src="https://github.com/user-attachments/assets/3cd5dfb8-a6bd-43dc-82b8-10beec84ff8e" />
+
 
 ## 许可证
 
