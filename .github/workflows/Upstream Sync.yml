@@ -1,172 +1,107 @@
-name: Upstream Sync
+name: Auto Sync Upstream
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "0 0 * * *"    # 每天 00:00 UTC（可按需改）
-  workflow_dispatch:      # 支持手动触发
+    - cron: "0 0 * * *" # 每天自动运行
 
 permissions:
   contents: write
 
 jobs:
-  upstream-sync:
+  sync:
     runs-on: ubuntu-latest
-    if: ${{ github.event.repository.fork }}
-
-    env:
-      RETRIES: 2            # 出错自动重试次数（包含第一次，共 RETRIES 次执行）
-      SYNC_COMMIT_PREFIX: "chore: sync with upstream"
 
     steps:
-      - name: Checkout fork (full)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+    # -------------------------
+    # 1. 拉取当前仓库代码
+    # -------------------------
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-      - name: Get upstream repo info via GitHub API
-        id: upstream_info
-        run: |
-          # 通过 GitHub REST API 获取 fork 的 parent（上游）信息
-          API="https://api.github.com/repos/${{ github.repository }}"
-          PARENT_JSON=$(curl -s -H "Accept: application/vnd.github.v3+json" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$API")
-          PARENT_FULL=$(echo "$PARENT_JSON" | jq -r '.parent.full_name // empty')
-          PARENT_DEFAULT_BRANCH=$(echo "$PARENT_JSON" | jq -r '.parent.default_branch // empty')
+    # -------------------------
+    # 2. 检测 upstream 仓库是否存在
+    # -------------------------
+    - name: Detect Upstream
+      id: detect
+      run: |
+        set -e
+        echo "检查 upstream 是否存在..."
 
-          if [ -z "$PARENT_FULL" ] || [ "$PARENT_FULL" = "null" ]; then
-            echo "ERROR: 无法从 GitHub API 获取上游信息，可能该仓库不是 fork 或 API 受限。"
-            exit 1
-          fi
+        if ! git remote | grep -q upstream; then
+          echo "未找到 upstream，自动添加。"
+          # 自动获取上游仓库 URL
+          UP_URL="$(git config --get remote.origin.url | sed 's/\.git$//')"
+          UP_URL="${UP_URL%/*}"
+          UPSTREAM="${UP_URL##*/}"
 
-          echo "parent=$PARENT_FULL" >> $GITHUB_OUTPUT
-          echo "parent_default_branch=$PARENT_DEFAULT_BRANCH" >> $GITHUB_OUTPUT
-        env:
-          # 用 GITHUB_TOKEN 调用 API（自动注入）
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "推测上游仓库为：$UPSTREAM"
 
-      - name: Add upstream remote and fetch everything (tags/releases included)
-        run: |
-          UPSTREAM="${{ steps.upstream_info.outputs.parent }}"
-          echo "Upstream repo: $UPSTREAM"
-          git remote remove upstream 2>/dev/null || true
-          git remote add upstream "https://github.com/$UPSTREAM.git"
-          # 强制拉取全部 refs（避免缓存/浅克隆导致误判）
-          git fetch --all --prune --tags
+          # 自动添加 upstream
+          git remote add upstream "https://github.com/$UPSTREAM/$(basename "$UP_URL").git"
+        fi
 
-      - name: Determine upstream default branch (stable)
-        id: detect_branch
-        run: |
-          # 优先使用 API 返回的 default_branch，如不存在再退回到 ls-remote 检测
-          BRANCH="${{ steps.upstream_info.outputs.parent_default_branch }}"
-          if [ -z "$BRANCH" ] || [ "$BRANCH" = "null" ]; then
-            BRANCH=$(git ls-remote --symref upstream HEAD | awk '/^ref:/ {print $2}' | sed 's#refs/heads/##')
-          fi
-          if [ -z "$BRANCH" ]; then
-            echo "无法识别上游默认分支，退出。"
-            exit 1
-          fi
-          echo "upstream_branch=$BRANCH" >> $GITHUB_OUTPUT
+        echo "upstream 已准备就绪。"
 
-      - name: Check upstream vs local (with retries)
-        id: check_updates
-        run: |
-          set -e
-          tries=0
-          while [ $tries -lt $RETRIES ]; do
-            tries=$((tries+1))
-            echo "检查第 $tries 次..."
-            # 确保 refs 最新
-            git fetch upstream ${ { steps.detect_branch.outputs.upstream_branch } } || true
-            UP_COMMIT=$(git rev-parse "upstream/${{ steps.detect_branch.outputs.upstream_branch }}" 2>/dev/null || echo "")
-            LOCAL_COMMIT=$(git rev-parse "origin/${{ github.ref_name }}" 2>/dev/null || git rev-parse HEAD)
-            echo "upstream commit: $UP_COMMIT"
-            echo "local commit:    $LOCAL_COMMIT"
+    # -------------------------
+    # 3. 检测当前分支名称（支持 main/master）
+    # -------------------------
+    - name: Detect Branch
+      id: branch
+      run: |
+        BRANCH="$(git symbolic-ref --short HEAD || echo main)"
+        echo "当前分支是：$BRANCH"
+        echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
-            if [ -z "$UP_COMMIT" ]; then
-              echo "警告：未能读取 upstream commit，重试（若多次失败请检查上游仓库可访问性）"
-              sleep 3
-              continue
-            fi
+    # -------------------------
+    # 4. 获取 upstream 最新提交
+    # -------------------------
+    - name: Fetch Upstream
+      run: |
+        set -e
+        BRANCH="${{ steps.branch.outputs.branch }}"
+        echo "从 upstream 获取 $BRANCH 最新提交..."
 
-            if [ "$UP_COMMIT" = "$LOCAL_COMMIT" ]; then
-              echo "changed=false" >> $GITHUB_OUTPUT
-              exit 0
-            else
-              echo "changed=true" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          done
+        git fetch upstream "$BRANCH"
 
-          echo "检查失败，达到重试上限。"
-          exit 1
+    # -------------------------
+    # 5. 判断是否有更新
+    # -------------------------
+    - name: Check Diff
+      id: diff
+      run: |
+        set -e
+        BRANCH="${{ steps.branch.outputs.branch }}"
+        LOCAL=$(git rev-parse "origin/$BRANCH")
+        REMOTE=$(git rev-parse "upstream/$BRANCH")
 
-      - name: Merge upstream into local and push (only if changed)
-        if: steps.check_updates.outputs.changed == 'true'
-        run: |
-          set -e
-          UP_BRANCH="${{ steps.detect_branch.outputs.upstream_branch }}"
-          echo "准备合并 upstream/$UP_BRANCH 到本地 ${GITHUB_REF_NAME:-${{ github.ref_name }}}"
-          # 再次 fetch 确保最新
-          git fetch upstream $UP_BRANCH
-          # checkout 到目标分支（如 actions checkout 的 ref_name 无法用，则切回 main/master）
-          TARGET_BRANCH="${GITHUB_REF_NAME:-${{ github.ref_name }}}"
-          # 若 TARGET_BRANCH 为空，尝试使用 upstream 默认分支名
-          if [ -z "$TARGET_BRANCH" ] || [ "$TARGET_BRANCH" = "refs/heads/" ]; then
-            TARGET_BRANCH="$UP_BRANCH"
-          fi
-          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH" || git checkout -B "$TARGET_BRANCH"
-          # 合并上游分支（非 fast-forward 时保留合并记录）
-          git merge --no-edit "upstream/$UP_BRANCH" || true
+        echo "本地提交：$LOCAL"
+        echo "上游提交：$REMOTE"
 
-          # 生成同步提交信息（包含上游 commit）
-          UP_COMMIT=$(git rev-parse "upstream/$UP_BRANCH")
-          TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          COMMIT_MSG="${SYNC_COMMIT_PREFIX} ${UP_BRANCH} (${TS}) - upstream@${UP_COMMIT}"
-          git commit --allow-empty -m "$COMMIT_MSG" || true
+        if [ "$LOCAL" = "$REMOTE" ]; then
+          echo "no_update=true" >> $GITHUB_OUTPUT
+          echo "没有更新，跳过同步。"
+        else
+          echo "no_update=false" >> $GITHUB_OUTPUT
+          echo "检测到更新，准备同步..."
+        fi
 
-          # 推送到 origin（使用 actions 自动 token）
-          # 注意：推送 workflows 可能被拒绝（如果被拒绝，请按日志提示设置 PAT）
-          git push origin "$TARGET_BRANCH" --follow-tags
+    # -------------------------
+    # 6. 同步最新更新（只有上游有更新才执行）
+    # -------------------------
+    - name: Merge & Push
+      if: steps.diff.outputs.no_update == 'false'
+      run: |
+        set -e
+        BRANCH="${{ steps.branch.outputs.branch }}"
 
-      - name: Sync tags/releases (if any new)
-        if: steps.check_updates.outputs.changed == 'true'
-        run: |
-          # 推送 tags（本地已 fetch upstream 的 tags）
-          # 仅推送 upstream 新的 tag 到 origin
-          echo "同步 tags 到 origin（若有）"
-          # 找到 upstream tag 列表并推送对应 tag
-          for t in $(git ls-remote --tags upstream | awk '{print $2}' | sed 's#refs/tags/##' | grep -v '{}' || true); do
-            if ! git ls-remote --tags origin | grep -q "refs/tags/$t"; then
-              echo "推送 tag: $t"
-              git push origin "refs/tags/$t"
-            fi
-          done
+        echo "开始合并 upstream/$BRANCH..."
+        git checkout "$BRANCH"
+        git merge "upstream/$BRANCH" --no-edit
 
-      - name: Sync .github/workflows from upstream (optional, may require PAT)
-        if: steps.check_updates.outputs.changed == 'true'
-        run: |
-          # 将上游的 .github/workflows 下文件复制到本仓库并提交
-          echo "尝试同步 .github/workflows 文件（注意：若使用 GITHUB_TOKEN 推送 workflow 可能被禁止）"
-          TMPDIR=$(mktemp -d)
-          git --work-tree="$TMPDIR" checkout upstream/${{ steps.detect_branch.outputs.upstream_branch }} -- .github/workflows || true
-          if [ -d "$TMPDIR/.github/workflows" ]; then
-            cp -r "$TMPDIR/.github/workflows" .github/ || true
-            git add .github/workflows || true
-            git commit -m "${SYNC_COMMIT_PREFIX} sync workflows (${{ steps.detect_branch.outputs.upstream_branch }})" || true
-            # 尝试使用 GITHUB_TOKEN 推送
-            if git push origin HEAD:${GITHUB_REF_NAME:-${{ github.ref_name }}}; then
-              echo "workflows 推送成功。"
-            else
-              echo "警告：使用 GITHUB_TOKEN 推送 workflows 被拒绝。若需要强制同步 workflows，请在仓库 Secrets 中设置名为 UPSTREAM_SYNC_TOKEN 的 PAT（repo 权限），并手动重新运行。"
-            fi
-          else
-            echo "上游没有 .github/workflows，或无法检出。"
-          fi
+        echo "推送到 origin..."
+        git push origin "$BRANCH"
 
-      - name: Finish message
-        run: |
-          if [ "${{ steps.check_updates.outputs.changed }}" = "true" ]; then
-            echo "🎉 已完成与上游同步。"
-          else
-            echo "✅ 上游无更新，本次跳过。"
-          fi
+        echo "同步完成 ✔️"
