@@ -1,7 +1,8 @@
 name: Auto Sync Upstream
+
 on:
   schedule:
-    - cron: "0 */12 * * *"
+    - cron: "0 */12 * * *"   # 每 12 小时同步一次
   workflow_dispatch:
 
 permissions:
@@ -17,46 +18,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect upstream from origin
-        id: upstream
+      - name: Set upstream repo manually
+        run: |
+          # 在此填写真实上游仓库，例如：
+          # UPSTREAM_REPO="shaoyouvip/uptime"
+          # UPSTREAM_REPO="cmliu/WorkerVless2sub"
+
+          UPSTREAM_REPO="eooce/Cloudflare-proxy"
+
+          echo "upstream_repo=$UPSTREAM_REPO" >> $GITHUB_OUTPUT
+
+      - name: Sync main branch
         run: |
           set -e
 
-          ORIGIN_URL=$(git remote get-url origin)
+          UPSTREAM_REPO="${{ steps.set-upstream-repo.outputs.upstream_repo }}"
 
-          echo "Fork 的 origin URL:"
-          echo "$ORIGIN_URL"
+          echo "使用的上游仓库：$UPSTREAM_REPO"
 
-          # 从 origin URL 去掉用户名，保留仓库名
-          # 例如： https://github.com/YourName/Repo.git → Repo.git
-          REPO_NAME=$(basename "$ORIGIN_URL")
-
-          # 去掉 .git
-          REPO_NAME="${REPO_NAME%.git}"
-
-          # 获取远程仓库的真实父仓库（API 查询）
-          PARENT=$(curl -s "https://api.github.com/repos/$GITHUB_REPOSITORY" | jq -r '.parent.full_name')
-
-          if [ "$PARENT" = "null" ] || [ -z "$PARENT" ]; then
-            echo "❌ GitHub API 无法获取 parent，说明 fork 来源已删除/迁移"
-            echo "❌ 无法继续自动同步"
-            exit 1
-          fi
-
-          echo "上游仓库：$PARENT"
-
-          echo "parent=$PARENT" >> $GITHUB_OUTPUT
-
-          git remote add upstream "https://github.com/$PARENT.git" || true
-          git remote set-url upstream "https://github.com/$PARENT.git"
-
-      - name: Sync branch
-        run: |
-          set -e
-
-          UPSTREAM="${{ steps.upstream.outputs.parent }}"
-
-          echo "从上游获取最新内容：$UPSTREAM"
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git" || true
+          git remote set-url upstream "https://github.com/$UPSTREAM_REPO.git"
 
           git fetch upstream main
 
@@ -64,13 +45,12 @@ jobs:
           REMOTE=$(git rev-parse upstream/main)
 
           if [ "$LOCAL" = "$REMOTE" ]; then
-            echo "💤 没有新提交，跳过同步。"
+            echo "💤 上游无更新，跳过同步"
             exit 0
           fi
 
           echo "🔄 检测到更新，开始同步..."
           git checkout main
           git merge upstream/main --no-edit
-
           git push origin main
-          echo "✅ 同步完成！"
+          echo "✅ 同步完成"
