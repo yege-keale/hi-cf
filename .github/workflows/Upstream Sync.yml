@@ -1,9 +1,8 @@
 name: Auto Sync Upstream
-
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 0 * * *" # 每天自动运行
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,95 +12,65 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    # -------------------------
-    # 1. 拉取当前仓库代码
-    # -------------------------
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    # -------------------------
-    # 2. 检测 upstream 仓库是否存在
-    # -------------------------
-    - name: Detect Upstream
-      id: detect
-      run: |
-        set -e
-        echo "检查 upstream 是否存在..."
+      - name: Detect upstream from origin
+        id: upstream
+        run: |
+          set -e
 
-        if ! git remote | grep -q upstream; then
-          echo "未找到 upstream，自动添加。"
-          # 自动获取上游仓库 URL
-          UP_URL="$(git config --get remote.origin.url | sed 's/\.git$//')"
-          UP_URL="${UP_URL%/*}"
-          UPSTREAM="${UP_URL##*/}"
+          ORIGIN_URL=$(git remote get-url origin)
 
-          echo "推测上游仓库为：$UPSTREAM"
+          echo "Fork 的 origin URL:"
+          echo "$ORIGIN_URL"
 
-          # 自动添加 upstream
-          git remote add upstream "https://github.com/$UPSTREAM/$(basename "$UP_URL").git"
-        fi
+          # 从 origin URL 去掉用户名，保留仓库名
+          # 例如： https://github.com/YourName/Repo.git → Repo.git
+          REPO_NAME=$(basename "$ORIGIN_URL")
 
-        echo "upstream 已准备就绪。"
+          # 去掉 .git
+          REPO_NAME="${REPO_NAME%.git}"
 
-    # -------------------------
-    # 3. 检测当前分支名称（支持 main/master）
-    # -------------------------
-    - name: Detect Branch
-      id: branch
-      run: |
-        BRANCH="$(git symbolic-ref --short HEAD || echo main)"
-        echo "当前分支是：$BRANCH"
-        echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          # 获取远程仓库的真实父仓库（API 查询）
+          PARENT=$(curl -s "https://api.github.com/repos/$GITHUB_REPOSITORY" | jq -r '.parent.full_name')
 
-    # -------------------------
-    # 4. 获取 upstream 最新提交
-    # -------------------------
-    - name: Fetch Upstream
-      run: |
-        set -e
-        BRANCH="${{ steps.branch.outputs.branch }}"
-        echo "从 upstream 获取 $BRANCH 最新提交..."
+          if [ "$PARENT" = "null" ] || [ -z "$PARENT" ]; then
+            echo "❌ GitHub API 无法获取 parent，说明 fork 来源已删除/迁移"
+            echo "❌ 无法继续自动同步"
+            exit 1
+          fi
 
-        git fetch upstream "$BRANCH"
+          echo "上游仓库：$PARENT"
 
-    # -------------------------
-    # 5. 判断是否有更新
-    # -------------------------
-    - name: Check Diff
-      id: diff
-      run: |
-        set -e
-        BRANCH="${{ steps.branch.outputs.branch }}"
-        LOCAL=$(git rev-parse "origin/$BRANCH")
-        REMOTE=$(git rev-parse "upstream/$BRANCH")
+          echo "parent=$PARENT" >> $GITHUB_OUTPUT
 
-        echo "本地提交：$LOCAL"
-        echo "上游提交：$REMOTE"
+          git remote add upstream "https://github.com/$PARENT.git" || true
+          git remote set-url upstream "https://github.com/$PARENT.git"
 
-        if [ "$LOCAL" = "$REMOTE" ]; then
-          echo "no_update=true" >> $GITHUB_OUTPUT
-          echo "没有更新，跳过同步。"
-        else
-          echo "no_update=false" >> $GITHUB_OUTPUT
-          echo "检测到更新，准备同步..."
-        fi
+      - name: Sync branch
+        run: |
+          set -e
 
-    # -------------------------
-    # 6. 同步最新更新（只有上游有更新才执行）
-    # -------------------------
-    - name: Merge & Push
-      if: steps.diff.outputs.no_update == 'false'
-      run: |
-        set -e
-        BRANCH="${{ steps.branch.outputs.branch }}"
+          UPSTREAM="${{ steps.upstream.outputs.parent }}"
 
-        echo "开始合并 upstream/$BRANCH..."
-        git checkout "$BRANCH"
-        git merge "upstream/$BRANCH" --no-edit
+          echo "从上游获取最新内容：$UPSTREAM"
 
-        echo "推送到 origin..."
-        git push origin "$BRANCH"
+          git fetch upstream main
 
-        echo "同步完成 ✔️"
+          LOCAL=$(git rev-parse origin/main)
+          REMOTE=$(git rev-parse upstream/main)
+
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "💤 没有新提交，跳过同步。"
+            exit 0
+          fi
+
+          echo "🔄 检测到更新，开始同步..."
+          git checkout main
+          git merge upstream/main --no-edit
+
+          git push origin main
+          echo "✅ 同步完成！"
