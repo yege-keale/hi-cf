@@ -601,7 +601,7 @@ async function handle_post(request, cfg) {
 function generate_link(uuid, hostname, port, path, sni, currentHost, proxyIP = null) {
     const protc = 'x'+'h'+'t'+'t'+'p', header = 'v'+'l'+'e'+'s'+'s';
     const params = new URLSearchParams({
-        encryption: 'none', security: 'tls', sni: sni || currentHost, fp: 'chrome', allowInsecure: '1', alpn: 'h2,http/1.1',
+        encryption: 'none', security: 'tls', sni: sni || currentHost, fp: 'chrome', allowInsecure: '0', alpn: 'h2,http/1.1',
         type: protc, host: currentHost, path: path.startsWith('/') ? path : `/${path}`, mode: 'stream-one'
     })
     
